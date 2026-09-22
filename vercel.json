@@ -1,0 +1,11 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "installCommand": "npm install",
+  "crons": [
+    {
+      "path": "/api/agent/briefing?user_id=philip",
+      "schedule": "0 8 * * *"
+    }
+  ]
+}

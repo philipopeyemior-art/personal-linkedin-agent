@@ -1,0 +1,207 @@
+{
+  "name": "Workflow 1 — Morning Relationship Briefing",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "minutesInterval": 0,
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        },
+        "timezone": "Africa/Lagos"
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger (08:00 Africa/Lagos)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "fields": {
+          "values": [
+            {
+              "name": "briefing_date",
+              "value": "={{ $now.format('YYYY-MM-DD') }}"
+            },
+            {
+              "name": "timezone",
+              "value": "Africa/Lagos"
+            },
+            {
+              "name": "user_id",
+              "value": "philip"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-fields",
+      "name": "Set: briefing_date, timezone, user_id",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, array_agg(i.*) as recent_interactions FROM contacts c LEFT JOIN interactions i ON i.contact_id = c.id WHERE c.user_id = '00000000-0000-0000-0000-000000000001' OR c.user_id = 'philip' GROUP BY c.id ORDER BY c.updated_at DESC LIMIT 20;",
+        "additionalFields": {}
+      },
+      "id": "postgres-fetch",
+      "name": "Postgres: fetch open conversations and follow-ups",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [900, 300],
+      "credentials": {
+        "postgres": {
+          "id": "supabase-postgres",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.length }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "rightValue": 0
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-contacts",
+      "name": "IF: any contacts to review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://your-vercel-app.vercel.app/api/agent/briefing",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "user_id",
+              "value": "philip"
+            },
+            {
+              "name": "timezone",
+              "value": "Africa/Lagos"
+            },
+            {
+              "name": "contacts",
+              "value": "={{ $json }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-briefing",
+      "name": "HTTP Request: POST /agent/briefing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate response structure\nconst response = $input.first().json;\nif (!response.briefing && !response.summary) {\n  throw new Error('Invalid briefing response structure');\n}\nconst briefing = response.briefing || response;\nreturn {\n  json: {\n    valid: true,\n    briefing,\n    itemCount: briefing.items?.length || 0\n  }\n};"
+      },
+      "id": "code-validate",
+      "name": "Code: validate response structure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "agent_runs",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "philip",
+            "workflow_name": "morning_briefing",
+            "status": "success",
+            "input_summary": "={{ { contacts_reviewed: $json.briefing.contacts_reviewed || 0, timezone: 'Africa/Lagos' } }}",
+            "output_summary": "={{ $json.briefing }}"
+          },
+          "matchingColumns": [],
+          "schema": {
+            "user_id": "philip",
+            "workflow_name": "morning_briefing",
+            "status": "success"
+          }
+        },
+        "options": {}
+      },
+      "id": "postgres-save",
+      "name": "Postgres: save briefing and draft records",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "agent@phoslab.ai",
+        "toEmail": "philip@phoslab.ai",
+        "subject": "=Your LinkedIn Morning Briefing - {{ $now.format('YYYY-MM-DD') }}",
+        "text": "=Summary: {{ $json.briefing.summary }}\n\nItems:\n{{ $json.briefing.items.map(i => `- ${i.reason}: ${i.draft}`).join('\\n') }}\n\nView dashboard: https://your-vercel-app.vercel.app/briefings",
+        "options": {}
+      },
+      "id": "email-notify",
+      "name": "Send private email / dashboard notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2000, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (08:00 Africa/Lagos)": {
+      "main": [[{ "node": "Set: briefing_date, timezone, user_id", "type": "main", "index": 0 }]]
+    },
+    "Set: briefing_date, timezone, user_id": {
+      "main": [[{ "node": "Postgres: fetch open conversations and follow-ups", "type": "main", "index": 0 }]]
+    },
+    "Postgres: fetch open conversations and follow-ups": {
+      "main": [[{ "node": "IF: any contacts to review?", "type": "main", "index": 0 }]]
+    },
+    "IF: any contacts to review?": {
+      "main": [[{ "node": "HTTP Request: POST /agent/briefing", "type": "main", "index": 0 }], []]
+    },
+    "HTTP Request: POST /agent/briefing": {
+      "main": [[{ "node": "Code: validate response structure", "type": "main", "index": 0 }]]
+    },
+    "Code: validate response structure": {
+      "main": [[{ "node": "Postgres: save briefing and draft records", "type": "main", "index": 0 }]]
+    },
+    "Postgres: save briefing and draft records": {
+      "main": [[{ "node": "Send private email / dashboard notification", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "personal-linkedin-agent"
+  }
+}

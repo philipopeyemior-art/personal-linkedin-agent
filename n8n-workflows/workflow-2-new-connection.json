@@ -1,0 +1,219 @@
+{
+  "name": "Workflow 2 — New Connection Welcome",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-connection",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger - Authorized connection event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [460, 300],
+      "webhookId": "new-connection-webhook"
+    },
+    {
+      "parameters": {
+        "fields": {
+          "values": [
+            {
+              "name": "source",
+              "value": "={{ $json.source || 'manual' }}"
+            },
+            {
+              "name": "external_id",
+              "value": "={{ $json.external_id || $json.linkedin_member_id || $json.profile_url }}"
+            },
+            {
+              "name": "connected_at",
+              "value": "={{ $json.connected_at || $now.toISO() }}"
+            },
+            {
+              "name": "full_name",
+              "value": "={{ $json.full_name }}"
+            },
+            {
+              "name": "headline",
+              "value": "={{ $json.headline }}"
+            },
+            {
+              "name": "profile_url",
+              "value": "={{ $json.profile_url }}"
+            }
+          ]
+        }
+      },
+      "id": "normalize-event",
+      "name": "Edit Fields - Normalize event",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.full_name }}",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            },
+            {
+              "leftValue": "={{ $json.external_id }}",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-valid",
+      "name": "IF - Validate required fields",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM interactions WHERE user_id = 'philip' AND source = '{{ $json.source }}' AND external_event_id = '{{ $json.external_id }}' LIMIT 1;",
+        "additionalFields": {}
+      },
+      "id": "postgres-idempotency",
+      "name": "Postgres: idempotency check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1120, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://your-vercel-app.vercel.app/api/agent/welcome",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "full_name",
+              "value": "={{ $('Edit Fields - Normalize event').item.json.full_name }}"
+            },
+            {
+              "name": "headline",
+              "value": "={{ $('Edit Fields - Normalize event').item.json.headline }}"
+            },
+            {
+              "name": "profile_url",
+              "value": "={{ $('Edit Fields - Normalize event').item.json.profile_url }}"
+            },
+            {
+              "name": "source",
+              "value": "={{ $('Edit Fields - Normalize event').item.json.source }}"
+            },
+            {
+              "name": "external_event_id",
+              "value": "={{ $('Edit Fields - Normalize event').item.json.external_id }}"
+            },
+            {
+              "name": "user_id",
+              "value": "philip"
+            }
+          ]
+        }
+      },
+      "id": "http-welcome",
+      "name": "HTTP Request: POST /agent/welcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Policy check - ensure draft is not generic spam\nconst draft = $input.first().json.draft;\nif (!draft || !draft.draft_text) throw new Error('No draft generated');\nconst text = draft.draft_text.toLowerCase();\nconst generic = ['thanks for connecting!', 'let\\'s explore synergies'];\nconst isGeneric = generic.some(g => text.includes(g));\nif (isGeneric) throw new Error('Draft too generic, needs personalization');\nreturn { json: { ...draft, policy_passed: true } };"
+      },
+      "id": "policy-check",
+      "name": "Policy check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 400]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "drafts",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "philip",
+            "contact_id": "={{ $json.contact_id }}",
+            "purpose": "welcome",
+            "draft_text": "={{ $json.draft_text }}",
+            "status": "pending",
+            "requires_approval": true
+          }
+        }
+      },
+      "id": "postgres-save-draft",
+      "name": "Postgres: save draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1780, 400]
+    },
+    {
+      "parameters": {
+        "fromEmail": "agent@phoslab.ai",
+        "toEmail": "philip@phoslab.ai",
+        "subject": "=New connection: {{ $('Edit Fields - Normalize event').item.json.full_name }} - Draft ready",
+        "text": "=New connection detected: {{ $('Edit Fields - Normalize event').item.json.full_name }} ({{ $('Edit Fields - Normalize event').item.json.headline }})\n\nDraft:\n{{ $json.draft_text }}\n\nReview: https://your-vercel-app.vercel.app/drafts"
+      },
+      "id": "notify",
+      "name": "Notify Philip for review",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseData": "={{ { status: 'success', message: 'Draft created and awaiting approval', draft_id: $json.id || 'temp' } }}",
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Respond to webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2000, 200]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger - Authorized connection event": {
+      "main": [[{ "node": "Edit Fields - Normalize event", "type": "main", "index": 0 }]]
+    },
+    "Edit Fields - Normalize event": {
+      "main": [[{ "node": "IF - Validate required fields", "type": "main", "index": 0 }]]
+    },
+    "IF - Validate required fields": {
+      "main": [[{ "node": "Postgres: idempotency check", "type": "main", "index": 0 }], []]
+    },
+    "Postgres: idempotency check": {
+      "main": [[{ "node": "HTTP Request: POST /agent/welcome", "type": "main", "index": 0 }]]
+    },
+    "HTTP Request: POST /agent/welcome": {
+      "main": [[{ "node": "Policy check", "type": "main", "index": 0 }]]
+    },
+    "Policy check": {
+      "main": [[{ "node": "Postgres: save draft", "type": "main", "index": 0 }]]
+    },
+    "Postgres: save draft": {
+      "main": [[{ "node": "Notify Philip for review", "type": "main", "index": 0 }]]
+    },
+    "Notify Philip for review": {
+      "main": [[{ "node": "Respond to webhook", "type": "main", "index": 0 }]]
+    }
+  }
+}

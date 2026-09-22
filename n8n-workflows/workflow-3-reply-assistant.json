@@ -1,0 +1,209 @@
+{
+  "name": "Workflow 3 — Incoming Reply Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "incoming-message",
+        "options": {}
+      },
+      "id": "webhook-message",
+      "name": "Authorized message event / manual intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.content || $json.message }}",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ]
+        }
+      },
+      "id": "validate-message",
+      "name": "Validate message and source",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM interactions WHERE user_id = 'philip' AND external_event_id = '{{ $json.external_event_id || $json.message_id }}' AND source = '{{ $json.source || 'manual' }}' LIMIT 1;"
+      },
+      "id": "dedup",
+      "name": "Postgres: deduplicate event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, array_agg(i ORDER BY i.created_at DESC) as history FROM contacts c LEFT JOIN interactions i ON i.contact_id = c.id WHERE c.id = '{{ $json.contact_id }}' OR c.linkedin_member_id = '{{ $json.sender_id }}' GROUP BY c.id LIMIT 1;"
+      },
+      "id": "fetch-context",
+      "name": "Fetch contact + prior conversation context",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://your-vercel-app.vercel.app/api/agent/reply",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contact_id",
+              "value": "={{ $json.id || $json.contact_id }}"
+            },
+            {
+              "name": "incoming_message",
+              "value": "={{ $('Authorized message event / manual intake').item.json.content || $('Authorized message event / manual intake').item.json.message }}"
+            },
+            {
+              "name": "user_id",
+              "value": "philip"
+            },
+            {
+              "name": "source",
+              "value": "={{ $('Authorized message event / manual intake').item.json.source || 'manual' }}"
+            }
+          ]
+        }
+      },
+      "id": "http-reply",
+      "name": "HTTP Request: POST /agent/reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Classify and apply policy\nconst draft = $input.first().json;\nconst classification = draft.classification;\nconst sensitive = ['sales_or_negotiation', 'job_or_recruiter', 'sensitive_or_unclear'];\nconst needsReview = sensitive.includes(classification) || draft.policy?.risk_level !== 'low';\nreturn {\n  json: {\n    ...draft,\n    needs_review: needsReview,\n    routine: !needsReview\n  }\n};"
+      },
+      "id": "classify",
+      "name": "Classify message and apply policy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.routine }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-routine",
+      "name": "IF: routine and low-risk?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "drafts",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "philip",
+            "contact_id": "={{ $json.draft.contact_id }}",
+            "purpose": "={{ $json.draft.purpose }}",
+            "draft_text": "={{ $json.draft.draft_text }}",
+            "status": "pending",
+            "requires_approval": true
+          }
+        }
+      },
+      "id": "save-routine",
+      "name": "Save suggested reply (routine)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "drafts",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "philip",
+            "contact_id": "={{ $json.draft.contact_id }}",
+            "purpose": "={{ $json.draft.purpose }}",
+            "draft_text": "={{ $json.draft.draft_text }}",
+            "status": "pending",
+            "requires_approval": true
+          }
+        }
+      },
+      "id": "save-review",
+      "name": "Save as needs_review",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "fromEmail": "agent@phoslab.ai",
+        "toEmail": "philip@phoslab.ai",
+        "subject": "=New reply from {{ $json.draft.contact_id }} - {{ $json.classification }}",
+        "text": "=Classification: {{ $json.classification }}\nNeeds review: {{ $json.needs_review }}\n\nIncoming: {{ $('Authorized message event / manual intake').item.json.content }}\n\nSuggested reply:\n{{ $json.draft.draft_text }}\n\nDashboard: https://your-vercel-app.vercel.app/drafts"
+      },
+      "id": "notify-reply",
+      "name": "Notify Philip",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2220, 300]
+    }
+  ],
+  "connections": {
+    "Authorized message event / manual intake": {
+      "main": [[{ "node": "Validate message and source", "type": "main", "index": 0 }]]
+    },
+    "Validate message and source": {
+      "main": [[{ "node": "Postgres: deduplicate event", "type": "main", "index": 0 }]]
+    },
+    "Postgres: deduplicate event": {
+      "main": [[{ "node": "Fetch contact + prior conversation context", "type": "main", "index": 0 }]]
+    },
+    "Fetch contact + prior conversation context": {
+      "main": [[{ "node": "HTTP Request: POST /agent/reply", "type": "main", "index": 0 }]]
+    },
+    "HTTP Request: POST /agent/reply": {
+      "main": [[{ "node": "Classify message and apply policy", "type": "main", "index": 0 }]]
+    },
+    "Classify message and apply policy": {
+      "main": [[{ "node": "IF: routine and low-risk?", "type": "main", "index": 0 }]]
+    },
+    "IF: routine and low-risk?": {
+      "main": [
+        [{ "node": "Save suggested reply (routine)", "type": "main", "index": 0 }],
+        [{ "node": "Save as needs_review", "type": "main", "index": 0 }]
+      ]
+    },
+    "Save suggested reply (routine)": {
+      "main": [[{ "node": "Notify Philip", "type": "main", "index": 0 }]]
+    },
+    "Save as needs_review": {
+      "main": [[{ "node": "Notify Philip", "type": "main", "index": 0 }]]
+    }
+  }
+}
