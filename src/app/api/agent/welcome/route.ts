@@ -3,11 +3,13 @@ import { createServerSupabase } from '@/lib/supabase-server';
 import { buildWelcomePrompt } from '@/lib/prompts';
 import { generateWithLLM } from '@/lib/openai';
 import { checkDraftPolicy } from '@/lib/policy';
+import { normalizeUserId } from '@/lib/constants';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { contact_id, contact_data, extra_context, user_id = 'philip' } = body;
+    const { contact_id, contact_data, extra_context, user_id: rawUserId = 'philip' } = body;
+    const user_id = normalizeUserId(rawUserId);
 
     if (!contact_id && !contact_data) {
       return NextResponse.json({ error: 'contact_id or contact_data required' }, { status: 400 });
@@ -19,7 +21,6 @@ export async function POST(req: NextRequest) {
 
     let contact: any = contact_data;
 
-    // Try to fetch from DB if contact_id provided
     if (contact_id && supabase) {
       const { data } = await supabase.from('contacts').select('*').eq('id', contact_id).single();
       if (data) contact = data;
@@ -36,8 +37,7 @@ export async function POST(req: NextRequest) {
       };
     }
 
-    // Idempotency check - has this contact been welcomed recently?
-    if (supabase && contact.id) {
+    if (supabase && contact.id && contact.id !== 'temp') {
       const { data: recentDrafts } = await supabase
         .from('drafts')
         .select('id, created_at')
@@ -54,11 +54,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Generate personalized welcome
     const prompt = buildWelcomePrompt(contact, extra_context);
     const draftText = await generateWithLLM(prompt, { temperature: 0.8, maxTokens: 300 });
-
-    // Policy check
     const policy = checkDraftPolicy(draftText, 'welcome', contact);
 
     if (!policy.allowed) {
@@ -70,28 +67,26 @@ export async function POST(req: NextRequest) {
       }, { status: 422 });
     }
 
-    // Save draft
     let savedDraft: any = null;
     if (supabase && contact.id && contact.id !== 'temp') {
-      const { data, error } = await supabase.from('drafts').insert({
-        user_id,
-        contact_id: contact.id,
-        purpose: 'welcome',
-        draft_text: draftText,
-        status: 'pending',
-        requires_approval: policy.requires_approval,
-      }).select().single();
-
-      if (!error) savedDraft = data;
-
-      // Log agent run
-      await supabase.from('agent_runs').insert({
-        user_id,
-        workflow_name: 'welcome',
-        status: policy.allowed ? 'success' : 'policy_blocked',
-        input_summary: { contact_id: contact.id, source: contact.source },
-        output_summary: { draft_length: draftText.length, policy },
-      });
+      try {
+        const { data, error } = await supabase.from('drafts').insert({
+          user_id,
+          contact_id: contact.id,
+          purpose: 'welcome',
+          draft_text: draftText,
+          status: 'pending',
+          requires_approval: policy.requires_approval,
+        }).select().single();
+        if (!error) savedDraft = data;
+        await supabase.from('agent_runs').insert({
+          user_id,
+          workflow_name: 'welcome',
+          status: policy.allowed ? 'success' : 'policy_blocked',
+          input_summary: { contact_id: contact.id, source: contact.source },
+          output_summary: { draft_length: draftText.length, policy },
+        });
+      } catch (e) { console.error('DB save error', e); }
     }
 
     return NextResponse.json({

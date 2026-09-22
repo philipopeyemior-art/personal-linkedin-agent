@@ -2,11 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase-server';
 import { buildBriefingPrompt } from '@/lib/prompts';
 import { generateWithLLM } from '@/lib/openai';
+import { normalizeUserId } from '@/lib/constants';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { user_id = 'philip', timezone = 'Africa/Lagos', contacts: providedContacts, followups } = body;
+    const { user_id: rawUserId = 'philip', timezone = 'Africa/Lagos', contacts: providedContacts } = body;
+    const user_id = normalizeUserId(rawUserId);
 
     const supabase = (() => {
       try { return createServerSupabase(); } catch { return null; }
@@ -14,18 +16,8 @@ export async function POST(req: NextRequest) {
 
     let contacts: any[] = providedContacts || [];
 
-    // Fetch from DB if not provided
     if (contacts.length === 0 && supabase) {
-      // Get contacts with last interaction info
-      const { data: contactsData } = await supabase
-        .from('contacts')
-        .select(`
-          *,
-          interactions (created_at, kind, content, summary)
-        `)
-        .eq('user_id', user_id)
-        .limit(20);
-
+      const { data: contactsData } = await supabase.from('contacts').select(`*, interactions (created_at, kind, content, summary)`).eq('user_id', user_id).limit(20);
       if (contactsData) {
         contacts = contactsData.map((c: any) => ({
           ...c,
@@ -33,31 +25,16 @@ export async function POST(req: NextRequest) {
           interaction_count: c.interactions?.length || 0,
         }));
       }
-
-      // Also get overdue followups
-      const { data: followupsData } = await supabase
-        .from('followups')
-        .select('*, contacts(*)')
-        .eq('user_id', user_id)
-        .eq('status', 'open')
-        .lte('due_at', new Date().toISOString())
-        .limit(10);
-
+      const { data: followupsData } = await supabase.from('followups').select('*, contacts(*)').eq('user_id', user_id).eq('status', 'open').lte('due_at', new Date().toISOString()).limit(10);
       if (followupsData && followupsData.length > 0) {
-        // Merge followup contacts into briefing if not already included
         followupsData.forEach((f: any) => {
           if (!contacts.find((c: any) => c.id === f.contact_id)) {
-            contacts.push({
-              ...f.contacts,
-              followup_reason: f.reason,
-              followup_due: f.due_at,
-            });
+            contacts.push({ ...f.contacts, followup_reason: f.reason, followup_due: f.due_at });
           }
         });
       }
     }
 
-    // If still no contacts, provide empty briefing
     if (contacts.length === 0) {
       return NextResponse.json({
         status: 'success',
@@ -70,7 +47,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Filter to contacts worth reviewing (not contacted in last 7 days, or followup due)
     const contactsToReview = contacts.filter((c: any) => {
       if (c.followup_reason) return true;
       if (!c.last_interaction) return true;
@@ -84,11 +60,9 @@ export async function POST(req: NextRequest) {
 
     let briefingData: any;
     try {
-      // Try to parse JSON
       const jsonMatch = llmResponse.match(/\{[\s\S]*\}/);
       briefingData = JSON.parse(jsonMatch ? jsonMatch[0] : llmResponse);
     } catch {
-      // Fallback
       briefingData = {
         summary: `You have ${contactsToReview.length} contacts to review today.`,
         items: contactsToReview.slice(0, 3).map((c: any) => ({
@@ -101,28 +75,30 @@ export async function POST(req: NextRequest) {
       };
     }
 
-    // Save drafts for briefing items
     if (supabase) {
       for (const item of briefingData.items || []) {
         if (item.contact_id && item.draft) {
-          await supabase.from('drafts').insert({
-            user_id,
-            contact_id: item.contact_id,
-            purpose: `briefing_${item.reason}`,
-            draft_text: item.draft,
-            status: 'pending',
-            requires_approval: true,
-          });
+          try {
+            await supabase.from('drafts').insert({
+              user_id,
+              contact_id: item.contact_id,
+              purpose: `briefing_${item.reason}`,
+              draft_text: item.draft,
+              status: 'pending',
+              requires_approval: true,
+            });
+          } catch(e){ console.error(e); }
         }
       }
-
-      await supabase.from('agent_runs').insert({
-        user_id,
-        workflow_name: 'morning_briefing',
-        status: 'success',
-        input_summary: { contacts_reviewed: contactsToReview.length, timezone },
-        output_summary: briefingData,
-      });
+      try {
+        await supabase.from('agent_runs').insert({
+          user_id,
+          workflow_name: 'morning_briefing',
+          status: 'success',
+          input_summary: { contacts_reviewed: contactsToReview.length, timezone },
+          output_summary: briefingData,
+        });
+      } catch(e){ console.error(e); }
     }
 
     return NextResponse.json({
@@ -141,9 +117,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// Also support GET for cron
 export async function GET(req: NextRequest) {
-  // Allow Vercel Cron or n8n to trigger via GET
   const user_id = req.nextUrl.searchParams.get('user_id') || 'philip';
   return POST(new NextRequest(req.url, {
     method: 'POST',

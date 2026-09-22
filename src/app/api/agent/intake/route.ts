@@ -1,27 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase-server';
+import { normalizeUserId } from '@/lib/constants';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { 
-      type, // 'connection' | 'message' | 'note'
+      type,
       full_name,
       headline,
       profile_url,
       relationship_notes,
       content,
       contact_id,
-      user_id = 'philip',
+      user_id: rawUserId = 'philip',
       source = 'manual_intake'
     } = body;
+
+    const user_id = normalizeUserId(rawUserId);
 
     const supabase = (() => {
       try { return createServerSupabase(); } catch { return null; }
     })();
 
     if (!supabase) {
-      // Mock response when no DB
       return NextResponse.json({
         status: 'success_mock',
         message: 'Intake received (mock - no DB configured)',
@@ -31,15 +33,12 @@ export async function POST(req: NextRequest) {
 
     let contact: any = null;
 
-    // If contact_id provided, fetch it
     if (contact_id) {
       const { data } = await supabase.from('contacts').select('*').eq('id', contact_id).single();
       if (data) contact = data;
     }
 
-    // Otherwise create new contact if full_name provided
     if (!contact && full_name) {
-      // Check if contact exists by profile_url or name
       let existing = null;
       if (profile_url) {
         const { data } = await supabase.from('contacts').select('*').eq('profile_url', profile_url).eq('user_id', user_id).single();
@@ -48,7 +47,6 @@ export async function POST(req: NextRequest) {
       
       if (existing) {
         contact = existing;
-        // Update notes if provided
         if (relationship_notes || headline) {
           await supabase.from('contacts').update({
             headline: headline || existing.headline,
@@ -75,7 +73,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Contact not found and full_name required to create' }, { status: 400 });
     }
 
-    // Create interaction based on type
     if (type && content) {
       const kindMap: any = {
         'connection': 'connection',
